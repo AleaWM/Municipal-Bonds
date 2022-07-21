@@ -1,0 +1,1095 @@
+---
+title: "Use of Proceeds"
+author: "Alea Wilbur"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, tidy = TRUE)
+
+library(ggplot2)
+library(readxl)
+library(tidyverse)
+library(DT)
+#library(data.table)
+library(janitor)
+library(stringr)
+library(lubridate)
+```
+
+
+# Codebook
+
+Original files created by Meghan Makote:  1_ATL Database 8.15.xlsx, 2_Boston Database 8.15.xlsx, 3_Chicago Database 8.15.xlsx, 4_DC Database 8.15.xlsx, 5_SF Database 8.15.xlsx. These files were contain web scraped variables from the EMMA municipal bond pdf statements for all bonds found on the website after Jan 1. 2000 to sometime in 2021. Meghan  did web scraping and initial duplication check. She also created the cp_mapping variable which indicated if a bond series was a new issue or a refinancing (NEW or REF). This variable was initially used for including only new bond issues, but a new variable `ref_string` was eventually created in the data cleaning process to better indicate which observations were actually new bond issues. 
+
+**Steps taken during data cleaning process:**    
+- removed spaces in variable names using janitor::clean_names() command when reading in excel files
+- Consistent date format for issue_date and maturity_date (excel file had different formats originally between the files and even within individual files)  
+- variable type corrections (numeric vs character types)   
+- used rbind() to combine the standardized data frames for each city  
+- created dummy variables for if pdf link was missing or not and for if there as a principle value or not included in the data  
+- Please see "Municipal Bonds Data - Quality Check" (bonddata_june23.rmd) for data cleaning details and code.    
+- Saved combined city data with _all_ observations as `munibonds_allobservations_FINAL.csv`.  
+
+
+Intermediary files: The file munibonds_allobservations.csv was created from the 5  excel files containing each city's municipal bonds. It contains ALL observations for both new and refinanced bonds and bond series, n = 17,260 observations. These are unique CUSIPs for each bond within the bond series. Bonds within the same bond series may have different principle values, coupon rates, etc. 
+
+Over 1800 observations do not have principle values. After randomly checking links and looking for patterns within missing data, these observations will ultimately be dropped from the analysis. See bonddata_june23.rmd for data cleaning details. 
+
+After dropping bonds that were not new issues and removing observations that did not contain principle values, there were 9283 observations kept in the dataframe.
+
+
+
+```{r}
+#cities_keep_dup <- read_csv("cities_keep.csv")
+
+all_data <- read_csv("munibonds_allobservations_FINAL.csv") 
+
+cities_keep <- all_data %>% 
+  mutate(
+    ref_string = case_when(
+      str_detect(`issue_details`, c('REMARKET|RMK')) ~ "Remarket",
+      str_detect(`issue_details`, c('REFUNDING|REF.*BD|RFDG|REV.*REF')) ~ "Ref",
+      str_detect(`security_description`, c('REFUNDING|REF.*BD|RFDG|REV.*REF'))~ "Ref",
+     str_detect(`security_description`, c('REMARKET|RMKT|RMK'))~ "Remarket",
+      TRUE ~ "Keep"),
+    ref_string = ifelse(cp_mapping == "REF", "REF", ref_string),
+    maturity_year = year(maturity_date),
+  fed_taxed = case_when(
+      str_detect(issue_details, c('NON-AMT|NON.*AMT|TAX.*EXEM|TAX-EXEM')) ~ 'Not Taxed',
+      str_detect(security_description, c("NON-AMT|NON.*AMT|TAX.*EXEM|TAX-EXEM"))~ 'Not Taxed',
+      str_detect(issue_details, c("FEDERALLY.*TAX|TAXABLE|\\b\\s\\sAMT.*\\b")) ~ "Taxable",
+      str_detect(security_description, "FEDERALLY.*TAX|TAXABLE|\\b\\s\\sAMT.*\\b") ~ "Taxable",
+      TRUE ~ "Unknown")) %>%
+  filter(principle_amount_at_issuance > 0 &
+         ref_string == "Keep" &
+         maturity_date <= '2062-01-01')  # 40 years into future
+#9283 X 26
+cities_keep
+#table(cities_keep$fed_taxed)
+```
+
+# Categorical Coding
+
+- **Original Categories used by Meghan**: "Airports", "Gen Purpose/Pub Improvement", "Higher Education", "Industrial Development", "Library or Museums", "Multi-Family Housing", "Other Healthcare", "Other Housing", "Parks/Zoos/Beaches", "Primary/Secondary Education", "Redevelopment/Ld Clearance", "Single Family Housing", "Solid Waste", "Stadiums/Sports Complex", "Water and Sewer"  
+
+- Used as guide but not did not keept all categories  
+
+- Other potential variables: Capital Purpose, Collateral pledge, Coupon type (fixed, variable)  
+
+
+```{r}
+capital_words <- c("MULTIMOD", "BUILD AMER", "BRIDGE","BRDG", "BELTWAY", "BELTLINE","TRANSPO", "CAP APPREC", "CAPITAL APP", "CAPITAL")
+
+
+utilities <-c("WTR","WATER","SWR","SEWER","BROADBAND","UTILITIES", "ELECTRIC")
+
+education <- c("UNIVERSITY","CAMPUS","UNIV","COLLEGE","SCHOOL","\\bSCHL\\b","\\bSCH\\b ","STUDENT","ACADEMY","CHARTER")
+
+health <-  c("HEALTH","HOSP","PUB.*HLTH", "HOSP")
+
+housing <- c("MULTIFAMILY","HOUSING","RESIDENTIAL","HSG","APTS","SINGLE.*FAMILY")
+transportation <- c("trans","rail","beltway","beltline","bridge", "brdg", "multimod", "parking")
+
+entertainment <- c("stadium", "convention.*center","arena", "sport","museum", "aquar","zoo")
+
+industrial_development <- c("DEVELOPMENT", "//bREDEV", "DEV.*AUTH", "TAX.*ALLO", "TAX.*INC", "ENTERPR")
+
+TIF_REV_bonds <- c("TAX.*INCREMENT","//bTAX.*ALLO","TIF","ECONO") 
+
+##Private vs public
+public_infrastructure <- c("CAP.*APPREC","CAPITAL.*APP","", "PUBLIC.*UTIL", "PUBLIC.*SAFETY","PUB.*SAF","SAFETY", "\\bPUB.*IMP","PUBLIC.*IMP","IMPVT","\\bIMPT")
+private_investment <- c("LLC","corporation","enterprise","private")
+
+
+gobond <- c("GENERAL OBLI","GEN OB", " GO ", "G O ", "G.O.")
+paste(gobond, collapse = "|")
+
+housing_type <- c("MULTIFAMILY|HOUSING|RESIDENTIAL|HSG|APTS|SINGLE.*FAMILY")
+
+
+```
+
+
+`cities_keep` includes only new bond observations (i.e. not refinancing, refunding, remarketing, etc.) that had principle values in the data and mature before 2062.
+
+- Of the original 17260 observations scraped from the EMMA website for 5 cities since 2000, 9289 remain.  
+
+
+__Notes__:   
+
+- Use grepl() on variables to find and categorize strings in grouped data. (Could use grepl on non-grouped observations, but this was easier to see what was or was not working. Once more confident in code, then maybe apply to ungrouped observations to avoid any potential joining mishaps later on.)   
+
+- Grouping by Issuer causes some problems due to inconsistencies with names. Could use cusip_identifier but not always there. Other option is use the first 7 digits from CUSIP since that is the equivalent of the cusip id for issuers.   
+
+
+```{r}
+# bondseries <- cities_keep %>%
+#   group_by(city, official_statement, issue_details,
+#            security_description) %>%
+#   summarize(summed_principal = sum(as.numeric(principle_amount_at_issuance), na.rm = TRUE) )
+
+# # 1451 groups without issue_date
+
+
+bondseries <- cities_keep %>% 
+  group_by(city, security_description, issue_date, issue_details,  official_statement) %>%
+  summarize(summed_principal = sum(as.numeric(principle_amount_at_issuance), na.rm = TRUE) ) 
+bondseries
+
+# 1540 new bond groups with issue_date
+```
+
+
+## Major Bond Categories
+
+__Revenue and GO Bonds__
+
+After a LOT of trial and error, the code below does a good job finding different variations of GO bonds and Revenue bonds in the variable descriptions. Identifying word boundaries and spaces is a key part of finding what you are actually looking for. Otherwise searching "GO" returns everything that has "CHICAGO" since GO is inside CHICAGO. To fix this problem, tell R that you want nothing before the G in GO with `\\bGO` or a boundary, a space, and then GO, and then another boundary like this: `\\b\\sGO.*\\b`. 
+
+
+
+```{r rev-go-bonds}
+
+revbond <- c("\\bREV.*BD\\b|\\bREV|\\bGENERAL.*REV|\\bGEN.*REV")
+gobond <- c("\\bGO.*BD\\b|\\bGO.*BOND\\b|\\bGEN.*OB|\\bGENERAL.*OB|\\bG.*O\\b|\\b\\sGO.*\\b")
+otherbond <- c("\\bNOTE|TAX.*ALLOCATION|CERTIFICATE.*OF.*PART|TAX.*ANTIC|TAX.*INC|\\bNTS\\b|CTFS")
+
+
+# bondseries2 <- bondseries %>%
+#   mutate(
+#     rev_GO = case_when(
+#             str_detect(issue_details, c("\\bGO.*BD\\b|\\bGO.*BOND\\b|\\bGEN.*OB|\\bGENERAL.*OB|\\bG.*O\\b|\\b\\sGO.*\\b")) ~ "GO Bond",
+#       str_detect(security_description, c("\\bGO.*BD|\\bGO.*BOND|\\bGEN.*OB|\\bGENERAL.*OB|\\bG.*O\\b|\\b\\sGO.*\\b")) ~ "GO Bond",
+# 
+#             str_detect(issue_details, c("\\bNOTE|TAX.*ALLOCATION|CERTIFICATE.*OF.*PART|TAX.*ANTIC|TAX.*INC|\\bNTS\\b|CTFS")) ~ "Other", 
+#             str_detect(security_description, c("\\bNOTE|TAX.*ALLOCATION|CERTIFICATE.*OF.*PART|TAX.*ANTIC|TAX.*INC|\\bNTS\\b|CTFS")) ~ "Other", 
+# 
+#       str_detect(issue_details, c("\\bREV.*BD\\b|\\bREV|\\bGENERAL.*REV|\\bGEN.*REV")) ~ "Revenue Bond", 
+#       str_detect(security_description, c("\\bREV.*BD|\\bREV|\\bGENERAL.*REV|\\bGEN.*REV")) ~ "Revenue Bond", 
+#       TRUE ~ "Unknown"
+#     ))
+
+bondseries2 <- bondseries %>%
+  mutate(
+    rev_GO = case_when(
+      str_detect(issue_details, gobond) ~ "GO Bond",
+      str_detect(security_description, gobond) ~ "GO Bond",
+      
+      str_detect(issue_details, otherbond) ~ "Other Bond", 
+      str_detect(security_description, otherbond) ~ "Other Bond", 
+      
+      str_detect(issue_details, revbond) ~ "Revenue Bond", 
+      str_detect(security_description, revbond) ~ "Revenue Bond", 
+      TRUE ~ "Unknown"
+    ))
+
+
+table(bondseries2$rev_GO)
+# 238 GO, 920 Rev, 227 Other, 155 Unknown
+
+# switched order, now
+ #252 GO, 920 Rev, 213 Other, 155 Unknown
+```
+
+Check work: Look at what was considered a GO bond, revenue bond, or "unknown":
+
+GO Bonds:
+```{r}
+bondseries2 %>% filter(rev_GO == "GO Bond")
+```
+
+Revenue Bonds:
+```{r}
+bondseries2 %>% filter(rev_GO == "Revenue Bond")
+```
+
+Unknown Bonds:
+```{r}
+bondseries2 %>% filter(rev_GO == "Unknown")
+```
+
+Other Bonds:
+```{r}
+bondseries2 %>% filter(rev_GO == "Other Bond")
+
+```
+
+
+
+## Use of Proceeds
+
+Proposed research question from Weber and Tapp doc:
+
+_categories mentioned: (utilities, education, transportation, entertainment, housing, hospitals, industrial development, and tax increment financing revenue bonds; public infrastructure vs. those issued on behalf of a private entity)_
+
+_Do affordable housing projects happen in spurts?_
+
+_Types of housing: How did planners use this time to expand non-market housing? (1) What typologies of debt issuance characterize the period between the global financial crisis and the start of the COVID-19 crisis? (2) How did cities use municipal bonds to deliver affordable housing?_
+
+
+
+### Issue Details
+
+```{r use-of-proceeds-issuedetails, warning=FALSE, error=TRUE}
+cap_improve <- c("MULTIMOD|BUILD.*AMER|BRIDGE|BRDG|BELTWAY|BELTLINE|TRANSPO|CAP.*APPREC|CAPITAL.*APP|RAPID.*TRAN")
+# includes capital words, Build America, infrastructure, and transportation words
+pub_utilities <- c("PUBLIC.*UTIL")
+pub_improve <- c("\\bPUB.*IMP|PUBLIC.*IMP|IMPVT|\\bIMPT")
+pub_safety <- c("PUBLIC.*SAFETY|PUB.*SAF|SAFETY|FIRE.*DEPT")
+LLC <- c("LLC|\\bLLC")
+airport <- c("AIRPORT|ARPT")
+development <- c("DEVELOPMENT|//bREDEV|DEV.*AUTH|TAX.*ALLO|TAX.*INC|ENTERPR|OPPORTUNITY|TIF|ECONO")
+# development includes TIF words. Does NOT include Industrial Development. 
+# unclear on difference between development, redevelopment, and indus. dev.
+
+education <- c("UNIVERSITY|CAMPUS|UNIV|COLLEGE|SCHOOL|\\bSCHL\\b|\\bSCH\\b |STUDENT|ACADEMY|CHARTER")
+# All education. Schools, charters, academies, universities, campus, etc.
+
+# primary_edu <- c("SCHOOL|\\bSCH\\b|\\bSCHL|CHARTER")
+
+health <- c("HEALTH|HOSP|PUB.*HLTH")
+housing <- c("MULTI.*F|MULTIFAMILY|HOUSING|RESIDENTIAL|HSG|APTS|SINGLE.*FAMILY")
+general_purpose <- c("VAR.*PURP|VARIOUS.*PURP|GEN.*PURP|GENERAL.*PURPOSE")
+water_sewer <- c("WTR|WATER|SEWER|SWR")
+entertainment <- c("SPORT|STADIUM|CONVENTION|CENTER|ZOO|AQUAR|MUSEUM|SMITHSO|YOUTH.*CTR|\\bCOMMUNITY.*CTR")
+indust_dev<-  c("INDL.*DEV|IND.*DEV|//bIND.*")
+parks_beaches <- c("PK|\\bPARK\\b|BEACH|RECREATION")
+municipal_facilities <- c("NEIGHBORHOODS.*ALIVE|NEIGHBORHDS.*ALIVE")
+settlements <- c("SETTLEMENT.*OB")
+
+### Other variable coding ideas
+# transportation <- c("TRANS","RAIL","BELTWAY","BELTLINE","BRDIGE", "BRDG", "MULTIMOD")
+
+bondseries2 <- bondseries2 %>%
+  mutate(
+    use_of_proceeds_issuedetails = case_when(
+      str_detect(issue_details, cap_improve) ~ "Capital Improvement",
+      str_detect(issue_details, pub_utilities)~ "Public Utilities",
+      str_detect(issue_details, pub_safety)~ "Public Safety",
+      # str_detect(issue_details, LLC) ~ "LLC",
+      #  str_detect(issue_details, c("DIRECT.*ACC")) ~ "Direct Access Bond",
+      # str_detect(issue_details, c("ANTIC"))~ "Antic. Notes",
+      #  str_detect(issue_details, c("TENDER"))~ "Tender Notes",
+      #  str_detect(issue_details, c("TEMP.*N"))~ "Temporary Notes",
+      #  str_detect(issue_details, c("CTFS")) ~ "Collective Investment/CTF",
+      str_detect(issue_details, airport) ~ "Airport",
+      str_detect(issue_details, development)~ "Development/Redevelopment",
+      str_detect(issue_details, education)~ "Education", 
+      str_detect(issue_details, health) ~ "Health&Hospitals", 
+      str_detect(issue_details, housing) ~ "Housing",
+      str_detect(issue_details, pub_improve)~ "Public Improvement",
+      str_detect(issue_details, indust_dev)~ "Industrial Development",
+      str_detect(issue_details, general_purpose) ~ "Gen. or Var. Purpose",
+      str_detect(issue_details, municipal_facilities)~ "Municipal Facilities",
+      str_detect(issue_details, entertainment)~ "Entertainment", 
+      str_detect(issue_details, water_sewer) ~ "Water & Sewer",
+   #   str_detect(issue_details, tif_econdev) ~ "TIF/Economic Zones",
+      str_detect(issue_details, parks_beaches) ~ "Parks & Beaches", 
+      str_detect(issue_details, settlements) ~ "Settlements", 
+
+      TRUE ~ "Unknown"))
+table(bondseries2$use_of_proceeds_issuedetails)
+
+```
+
+There are 391 Unknowns. If we want slightly more detail, we can code them as Revenue, GO, or Other bonds. Ex. if  `use_of_proceeds_issuedetails == "Unknown"` and `rev_GO == Revenue Bond`, then it will code it as a generic revenue bond. This is done below where there are now 64 Unknown instead of 391:
+
+```{r use-of-proceeds-issuedetails2, warning=FALSE, error=TRUE}
+
+bondseries2 <- bondseries2 %>%
+  mutate(
+    use_of_proceeds_issuedetails = case_when(
+      str_detect(issue_details, cap_improve) ~ "Capital Improvement",
+      str_detect(issue_details, pub_utilities)~ "Public Utilities",
+      str_detect(issue_details, pub_safety)~ "Public Safety",
+      # str_detect(issue_details, LLC) ~ "LLC",
+      #  str_detect(issue_details, c("DIRECT.*ACC")) ~ "Direct Access Bond",
+      # str_detect(issue_details, c("ANTIC"))~ "Antic. Notes",
+      #  str_detect(issue_details, c("TENDER"))~ "Tender Notes",
+      #  str_detect(issue_details, c("TEMP.*N"))~ "Temporary Notes",
+      #  str_detect(issue_details, c("CTFS")) ~ "Collective Investment/CTF",
+      str_detect(issue_details, airport) ~ "Airport",
+      str_detect(issue_details, development)~ "Development/Redevelopment",
+      str_detect(issue_details, education)~ "Education", 
+      str_detect(issue_details, health) ~ "Health&Hospitals", 
+      str_detect(issue_details, housing) ~ "Housing",
+      str_detect(issue_details, pub_improve)~ "Public Improvement",
+      str_detect(issue_details, indust_dev)~ "Industrial Development",
+      str_detect(issue_details, general_purpose) ~ "Gen. or Var. Purpose",
+      str_detect(issue_details, municipal_facilities)~ "Municipal Facilities",
+      str_detect(issue_details, entertainment)~ "Entertainment", 
+      str_detect(issue_details, water_sewer) ~ "Water & Sewer",
+   #   str_detect(issue_details, tif_econdev) ~ "TIF/Economic Zones",
+      str_detect(issue_details, parks_beaches) ~ "Parks & Beaches", 
+      str_detect(issue_details, settlements) ~ "Settlements", 
+
+      TRUE ~ "Unknown"),
+    use_of_proceeds_issuedetails = ifelse(use_of_proceeds_issuedetails == "Unknown" & rev_GO=="GO Bond", "Gen. Ob.", use_of_proceeds_issuedetails),
+        use_of_proceeds_issuedetails = ifelse(use_of_proceeds_issuedetails == "Unknown" & rev_GO=="Other Bond", "Other", use_of_proceeds_issuedetails),
+
+    use_of_proceeds_issuedetails = ifelse(use_of_proceeds_issuedetails == "Unknown" & rev_GO =="Revenue Bond", "Revenue Bond", use_of_proceeds_issuedetails) )
+
+
+table(bondseries2$use_of_proceeds_issuedetails)
+# 64 unknowns
+```
+
+If you want to look at those that were coded as Unknown:
+```{r use-of-proceeds-issuedetails-unknown}
+bondseries2%>%filter(use_of_proceeds_issuedetails == "Unknown")
+```
+
+Main themes for Unknown proceed types include words like "ARS", "Subseries", "Cap Apprec", Direct Access, CPI, FLOATS, etc. These words are mostly captured in the Bond Type variables created later. 
+
+
+### Security Description 
+
+Many of these (below) capture the use of proceeds, not the bond security method despite the variable name. The `security_description` variable is better for other information like rate type, bond type, funding type, etc. but in this section we check for additional use of proceeds information, just in case its included in this variable but not the issue_details.  
+
+- Can combine security_description use of proceeds with the issue_detail use of proceeds. If both variables determine a use of proceeds. Check if they are they same.  
+
+
+```{r eval = FALSE}
+bondseries2 <- bondseries2 %>%
+mutate(
+  use_of_proceeds_secdesc =  case_when(
+      str_detect(security_description, c("AIRPORT|ARPT")) ~ "Airport",
+      str_detect(security_description, c("BRIDGE|BRDG|BELT|RAPID.*TRAN|TRANSIT"))~ "Transit/Roads",
+      str_detect(security_description, c("DEVELOPMENT AUTHORITY|\\bREDEV|\\bDEV.*AUTH|DOWNTOWN|OPPORT"))~ "Development/Redevelopment",
+      str_detect(security_description, c("UNIVERSITY|CAMPUS|UNIV|COLLEGE|GEORGIA/*TECH|STUDENT.*HSG"))~ "Higher Ed",  
+      str_detect(security_description, c("SCHOOL|\\bSCH\\b|\\bSCHL|CHARTER" ))~ "Primary/Secondary Ed",
+      str_detect(security_description, c("VAR.*PUR|VARIOUS.*PUR|GEN.*PUR|GENERAL PURPOSE"))~ "Gen. or Var. Purpose",
+      str_detect(security_description, c("MULTIFAMILY.*HOUSING|//bRESIDENTIAL|HSG|//bAPT//b")) ~ "Housing",
+      str_detect(security_description, c("INDL.*DEV|IND.*DEV|//bIND"))~ "Industrial Development",
+      str_detect(security_description, c("PK|PARK|BEACH|ZOO|MUSEUM|AQUAR" ))~ "Parks and Beaches",   
+             
+      str_detect(security_description, c("PUB.*IMP|PUBLIC.*IMP")) ~ "Public Improvement",
+ # types of centers: transit, community, youth, health, convention, center for ...., ctr strategic & intl studies, research center, treatment center ....., 
+      str_detect(security_description, c("YOUTH.*CTR|]]bCOMMUNITY.*CTR"))~ "Community Center",
+          str_detect(security_description, c("SPORT|STADIUM|CONVENTION"))~ "Sports/Stadiums",
+      str_detect(security_description, c("WTR|WATER|SEWER|SWR")) ~ "Water & Sewer",
+      str_detect(security_description, c("CAP.*APPR|CAPIT|CAPITAL")) ~ "Capital Apprec",
+      str_detect(security_description, "NEIGHBORHOODS.*ALIVE")~ "Municipal Facilities",
+
+      TRUE ~ "Unknown"
+      ))
+
+table(bondseries2$use_of_proceeds_secdesc)
+```
+
+> This is not as thorough as the issue_details_useofproceeds. Mostly done to as code example for pulling use of proceeds from this variable. Potentially could be combined with issue_details use of proceed information if desired. I did not do this. 
+
+
+```{r use-proceeds-securitydesc}
+
+# use of proceeds from security_description variable
+
+capital_appreciation <- c("CAP.*APPR|CAPIT|CAPITAL")
+
+# types of centers: transit, community, youth, health, convention, center for ...., ctr strategic & intl studies, research center, treatment center ....., 
+community_ctr <- c("YOUTH.*CTR|\\bCOMMUNITY.*CTR|RECREATION")
+
+transportation <- c("TRANS|RAIL|BELTWAY|BELTLINE|BRDIGE|BRDG|MULTIMOD")
+       
+bondseries2 <- bondseries2 %>%
+  mutate(
+    use_of_proceeds_secdesc = case_when(
+      str_detect(security_description, transportation)~ "Transit/Roads",
+      str_detect(security_description, development)~ "Development",
+      str_detect(security_description, education)~ "Education",  
+      str_detect(security_description, general_purpose)~ "Gen. or Var. Purpose",
+      str_detect(security_description, housing) ~ "Housing",
+      str_detect(security_description, indust_dev)~ "Industrial Development",
+      str_detect(security_description, airport) ~ "Airport",
+
+      str_detect(security_description, parks_beaches) ~ "Parks and Beaches",
+      str_detect(security_description, pub_improve) ~ "Public Improvement",
+      str_detect(security_description, entertainment) ~ "Entertainment",
+      str_detect(security_description, water_sewer) ~ "Water & Sewer",
+      str_detect(security_description, capital_appreciation) ~ "Capital Apprec",
+      str_detect(security_description, municipal_facilities)~ "Municipal Facilities",
+      TRUE ~ "Unknown"))
+
+table(bondseries2$use_of_proceeds_secdesc)
+```
+
+
+To do: Most remaining observations are difficult to identify the use of proceeds. Code other variables first and maybe we can guess the use of proceeds later depending on if they are taxable, go bonds, etc.
+
+
+
+## Authorities
+
+This variable would ideally be coding who was doing the borrowing (e.g. Housing authorities, transportation authorities, etc.). Obviously different cities have different authorities that may have overlapping jurisdictions. This was just an attempt to see what kind of authorities could be easily identified in the data to see if it was useful. I currently do not know if it is useful, but it may be some day. 
+
+> Related to "Issuer Details" Section below. 
+
+Authorities spotted in the data. Not an exclusive list but a good start:   
+
+- Housing Auth | HSG AUTH  
+- Housing Fin Agency | HSG FIN A  
+- Urban Residential Finance Auth | Urban residential Fin auth  
+
+- Airports Auth | ARPTS AUTH  
+- School Financing Authority | SCH FIN AUTH   
+- Water and Sewer Auth | WTR & SWR  
+- Transit Auth | TRAN AUTH  
+
+- Development Auth | DEV AUTH  
+- Downtown Development Auth | Downtown DEV AUTH  
+- Industrial Development Financing Auth | INDL DEV FING AUTH  
+
+- Dev auth student hsg | Student housing  
+- Sports Auth | Convention CTR AUTH  
+
+- Finance Auth  
+- Facilities Auth | Facs Auth  
+- BLDG AUTH  
+
+```{r authorities}
+bondseries2 <- bondseries2 %>%
+mutate(
+  authorities = case_when(
+ 
+    str_detect(issue_details, c("MULTIMOD|BRIDGE|BRDG|BELTWAY|BELTLINE|TRAN")) ~ "Transit Auth",
+    str_detect(issue_details, c("\\bFIN.*AUTH|FINANCIAL.*AUT"))~ "Financial Auth",
+ #   str_detect(issue_details, c("PUBLIC SAFETY|PUB SAF|SAFETY"))~ "Government",
+ #   str_detect(issue_details, c("LLC| LCC")) ~ "LCC",
+    str_detect(issue_details, c("INDL|INDL.*DEV.*AUTH")) ~ "Industrial Dev. Auth.",
+
+    str_detect(issue_details, c("AIRPORT|ARPT")) ~ "Airports Auth",
+
+    str_detect(issue_details, c("URBAN.*RESIDENTIAL|HSG.*AUTH|HOUSING.*AUTH|MULTIFAM"))~ "Housing Authority",
+    str_detect(issue_details, c("DEVELOPMENT|REDEV|DEV.*AUTH|DEV.*FIN.*AUTH"))~ "Development Auth",
+    str_detect(issue_details, c("UNIVERSITY|CAMPUS|UNIV|COLLEGE|SCHOOL|SCHL|SCH |STUDENT|ACADEMY|CHARTER|DEV.*AUTH.*STUDENT"))~ "Education (High & Primary)", 
+    str_detect(issue_details, c("FIN.*AUTH|FINANCIAL.*AUTH")) ~ "Financial Authority", 
+  #  str_detect(issue_details, c("MULTIFAMILY")) ~ "Multi-Family Housing",
+     
+    str_detect(issue_details, c("PUB.*IMP|PUBLIC.*IMP|IMPVT|IMPT"))~ "Public Improvement",
+    str_detect(issue_details, c("INDL.*DEV|IND.*DEV|\\bIND"))~ "Industrial Dev. Auth",
+    str_detect(issue_details, c("VAR.*PURP|VARIOUS.*PURP|GEN.*PURP|GENERAL.*PURPOSE")) ~ "Gen. or Var. Purpose",
+    str_detect(issue_details, c("NEIGHBORHOODS.*ALIVE|NEIGHBORHDS.*ALIVE|FACS.*AUTH"))~ "Municipal Facilities",
+    str_detect(issue_details, c("SPORT|STADIUM|CONVENTION|CENTER|CTR"))~ "Sports/Stadiums", 
+    str_detect(issue_details, c("WTR|WATER|SEWER|SWR")) ~ "Water & Sewer Auth",
+     str_detect(issue_details, c("PK|PARK|BEACH|ZOO|AQUAR|MUSEUM|SMITHSO")) ~ "Parks, Museums, Zoo, Beach", 
+    TRUE ~ "Unknown"))
+
+
+table(bondseries2$authorities)
+
+bondseries2 %>% filter(authorities == "Unknown") %>%  DT::datatable()
+#618 unknown
+```
+
+## Housing Types
+
+Affordable, Multifamily|Multi-family|Multi-fam, Multi-family assisted living, Apartments, Housing opportunity program?, Single Family, Housing Authority using Build America Bonds, Collaterized multi-family mortgage bonds, Senior apartments
+
+> Technical detail for case_when(): if the values have been replaced once, they won’t be replaced again when using case_when.
+
+
+
+```{r create-housing}
+multifam <- c("MULTIFAM|MULIT|MULTI.*FAM|APARTMENT|APT") #yes there was a typo for mulit
+singlefam <- c("SINGLE")
+housing_auth <- c("HSG.*AUTH|HOUSING.*AUTH|HSG.*FIN.*AGY|URBAN.*RES")
+seniors <-  c("SENIOR.*AP|SENIOR.*HSG|SENIOR.*HOU|ASSIST|ELDERLY|SENIOR.*TOWER|SENIORS.*CTR")
+
+
+bondseries2 <- bondseries2 %>%
+mutate(
+  housing = case_when(
+    str_detect(security_description, c("SENIOR.*LIEN"))~"NonHousing", # kept getting pulled into senior housing so coding it specifically as NonHousing
+    str_detect(security_description, seniors)~ "Senior Housing",
+    str_detect(issue_details, c("SINGLE"))~ "Single Family",
+    str_detect(issue_details, multifam)~ "Multi-family", 
+    str_detect(issue_details, c("AFFORDABLE"))~ "Affordable",
+str_detect(issue_details, seniors)~ "Senior Housing",
+    str_detect(security_description, c("SINGLE"))~ "Single Family",
+    str_detect(issue_details, multifam)~ "Multi-family",
+    str_detect(security_description, c("AFFORDABLE"))~ "Affordable",
+ #   str_detect(issue_details, housing_auth)~ "Housing Authority",
+ #   str_detect(security_description, housing_auth)~ "Housing Authority",
+    TRUE ~ "NonHousing"))
+```
+
+
+```{r housing}
+bondseries2 %>% filter(housing != "NonHousing") # NOT equal to NonHousing
+#329 have some type of housing word
+```
+
+Observations that were coded as Housing Authority from the `authorites` variable:
+```{r}
+bondseries2 %>%filter(authorities == "Housing Authority")
+```
+
+Cross table of authorities and housing types:
+```{r}
+table(bondseries2$authorities, bondseries2$housing)
+
+```
+
+## Bond Type, Rate, Other Variables
+
+Two main types: GO bonds and revenue bonds. Coded at beginning of document in `rev_GO`. Besides just General Obligation Bonds and Revenue Bonds, additional detail on the bonds were included for many observations:
+
+> The search words could easily be updated/corrected for types of bonds, notes, securities, taxation, etc. But it's a solid start. 
+
+```{r bond-type}
+bondseries2 <- bondseries2 %>%
+mutate(bond_type = case_when(
+  str_detect(issue_details, c("\\bREF\\b|REFUND|RMKT|RMK")) ~ "Ref/Ref/Rmkt",
+      str_detect(security_description, c("\\bREF\\b|\\b\\sREFUND|\\bRMKT|RMK")) ~ "Ref/Ref/Rmkt",
+        str_detect(issue_details, c("CAP.*APPREC") )~ "Capital Apprec. Bond",
+        str_detect(security_description, c("TAX.*ANT|\\bNTS\\b|\\bNOTES\\b")) ~ "Anticipation Notes",
+      str_detect(issue_details, c("TAX.*ANT|\\bNTS\\b|\\bNOTES\\b")) ~ "Anticipation Notes",
+      str_detect(security_description, c(".*BUILD|BUILD.*AMER|BUILD.*ME")) ~ "Build Amer. Bonds",
+      str_detect(issue_details, c("BUILD.*AMER|BUILD.*M")) ~ "Build Amer. Bonds",
+     str_detect(security_description, c("FAC|FACS")) ~ "Facility Bonds",
+      str_detect(issue_details, c("\\b.*ARS|\\b.*ARS.*")) ~ "Auction Rate Security Bds",
+       str_detect(security_description, c("\\bARS|\\bARS.*")) ~ "Auction Rate Security Bds",
+      str_detect(issue_details, c("FAC|FACS")) ~ "Facility Bonds",
+      str_detect(security_description, "GREEN") ~ "Green Bonds",
+      str_detect(issue_details, "GREEN") ~ "Green Bonds",
+        str_detect(security_description, "SOCIAL") ~ "Social Bonds",
+      str_detect(issue_details, "SOCIAL") ~ "Social Bonds",
+  str_detect(security_description, c("TAX.*ALL|ALLOC|TIF\\b")) ~ "(TIF) Tax Allocation Bonds",
+      str_detect(issue_details, c("TAX.*ALL|ALLOC|TIF\\b")) ~ "(TIF) Tax Allocation Bonds",
+      TRUE ~ "Unknown"
+    ))#,
+table(bondseries2$bond_type)
+
+
+# run after coding other variables
+bondseries2 %>% filter(bond_type == "Unknown")
+```
+
+Types of notes:
+Tender notes, temporary notes, antic. notes
+notes <- c("TENDER","TEMP N", "TAX.*ANT",)
+
+__Anticipation Notes__   
+
+- __Bond anticipation notes (BANs)__ – Notes issued by a governmental unit, usually for capital projects, that are repaid from the proceeds of the issuance of long-term bonds.  
+
+- __Revenue anticipation notes (RANs)__ – Notes issued in anticipation of receiving revenues at a future date.  
+
+- __Tax and revenue anticipation notes (TRANs)__ – Notes issued in anticipation of receiving future tax receipts and revenues at a future date.  
+
+- Data has revenue notes, tax anticipation notes, tax increment allocation revenue notes, certificates of participation?, general obligation notes,general obligation tax revenue anticipation notes, tax revenue anticiaption notes, tender notes, housing revenue notes, temp notes
+
+
+Build America Bond are generally issued by a government for capital expenditures instead of issuing tax-exempt bonds.
+
+```{r build-america-bonds}
+bondseries2 <- bondseries2 %>%
+mutate(BABonds = case_when(
+  
+        str_detect(security_description, c(".*BUILD|BUILD.*AMER|BUILD.*ME|\\bBAB\\b")) ~ "Build Amer. Bonds",
+      str_detect(issue_details, c("BUILD.*AMER|BUILD.*M|\\bBAB\\b")) ~ "Build Amer. Bonds",
+      TRUE ~ "Unknown"
+      ))
+table(bondseries2$BABonds)
+
+```
+
+Number of build america bonds matches the number found when coding all bond types. This is good. 
+
+Facility Bonds has 71 occurrences in code chunk below and 64 occurrences above so there must be some overlap in categories.  
+- To do: Use list of tax exempt facility bonds to expand on this if it might be useful.  
+
+> Probably can make this better by adding the types of facilities in the search words
+
+
+```{r facility-bonds}
+bondseries2 <- bondseries2 %>%
+mutate(FAC_bonds = case_when(
+      str_detect(security_description, c("FAC|FACS")) ~ "Facility Bonds",
+      str_detect(issue_details, c("FAC|FACS")) ~ "Facility Bonds",
+
+      TRUE ~ "Not Fac. Bonds"))#,
+table(bondseries2$FAC_bonds)
+```
+
+
+
+Interest payment: Fixed, floating/variable, and zero-coupon. Interest is paid semiannually for fixed-coupon securities.
+
+```{r interest-rate-type}
+bondseries2 <- bondseries2 %>%
+mutate( 
+    rate_type = case_when(
+        str_detect(issue_details, c("FIXED")) ~ "Fixed",
+      str_detect(security_description, c("FIXED")) ~ "Fixed",
+      str_detect(security_description, c("ADJ")) ~ "Adjustable",
+      str_detect(issue_details, c("ADJ")) ~ "Adjustable",
+       str_detect(issue_details, c("\\bVAR.*\\b|FLOAT|\\bAVR\\b|AUCTION")) ~ "Variable",
+       str_detect(security_description, c("\\bVAR.*\\b|FLOAT|\\bAVR\\b|AUCTION")) ~ "Variable",
+    TRUE ~ "Unknown"
+    ))#,
+table(bondseries2$rate_type)
+```
+
+
+### Securities
+
+Security Codes -  "Double barreled", "Lease/Rent", "Loan Agreement", "Mortgage Loans", "Revenue", "Tax Allocation", "Unlimited Tax G.O."
+
+
+__GO Bond__ - paid for by ad valorem taxes. 
+__Revenue Bonds__ - do NOT require voter approval and are not paid for with taxes. Revenue specified in bond contract is required to be used for repayment.
+
+
+__Fixed Coupon Bonds vs Mortgage Bonds__
+
+Fixed Coupon Bonds: Traditional corporate and municipal bonds. 
+
+Mortgage-Backed Securities:  bonds secured by home and other real estate loans. MBS carry the guarantee of the issuing organization to pay interest and principal payments on their mortgage-backed securities. NOT a GO bond-not guaranteed by full faith and credit of US gov.     
+
+- Collateralized mortgage obligations: Called CMOs for short, these are a complex type of pass-through security. Instead of passing along interest and principal cash flow to an investor from a generally like-featured pool of assets (for example, 30-year fixed mortgages at 5.5 percent, which happens in traditional passthrough securities), CMOs are made up of many pools of securities.  
+
+> "COLL" in variables, is that for this?
+
+- Pass-throughs are another type of MBS    
+
+> Fix this search words in this code. Not sure what the variable should be called or the options created should be.
+
+```{r funding-type}
+bondseries2 <- bondseries2 %>%
+mutate(funding_type = case_when(
+      str_detect(issue_details, c("CTFS")) ~ "Collective Investment/CTF",    
+      str_detect(issue_details, c("TAX.*INCREM|TAX.*ALLO")) ~ "TIF",
+      str_detect(issue_details, c("CAP.*APPREC") )~ "Capital Apprec",                        
+      str_detect(issue_details, c("\\bMTG|\\bMORTG")) ~ "Mortgage",
+      str_detect(issue_details, c("LEASE")) ~ "Lease", # only San Fran specifies Leases
+      str_detect(security_description, c("LEASE")) ~ "Lease", # only San Fran specifies Leases
+      str_detect(security_description, c("TAX.*ANT")) ~ "Tax Anticipation Notes",
+      str_detect(issue_details, c("TAX.*ANT")) ~ "Tax Anticipation Notes",
+      str_detect(security_description, "CTFS") ~ "Collective Investment/CTF",    
+      str_detect(security_description, c("MTG|MORTG")) ~ "Mortgage",
+      str_detect(security_description, c("TAX.*INCREMENT|TAX.*ALLO")) ~ "TIF",
+    TRUE ~ "Unknown"
+    ),
+    
+    funding_type = ifelse((funding_type=="Unknown" & rev_GO == "GO Bond"), "Gen. Oblig.", funding_type),
+    funding_type = ifelse((funding_type=="Unknown" & rev_GO == "Revenue Bond"), "Future Revenue", funding_type))
+
+
+table(bondseries2$funding_type)
+```
+
+### Taxation
+
+AMT = Alternative Minimum Tax, bonds not exclusively used for government functions
+
+Federal Tax: Yes or No
+
+State tax: Yes or No - can't determine from text alone unless there is a general rule of thumb for what private vs public things are taxed at state or local level?
+
+```{r fed-taxed}
+bondseries2 <- bondseries2 %>%
+mutate(fed_taxed = case_when(
+      str_detect(issue_details, c('NON-AMT|NON.*AMT|TAX.*EXEM|TAX-EXEM')) ~ 'Not Taxed',
+      str_detect(security_description, c("NON-AMT|NON.*AMT|TAX.*EXEM|TAX-EXEM"))~ 'Not Taxed',
+      str_detect(issue_details, c("FEDERALLY.*TAX|TAXABLE|\\b\\s\\sAMT.*\\b")) ~ "Taxable",
+      str_detect(security_description, "TAXABLE|\\b\\s\\sAMT.*") ~ "Taxable",
+      TRUE ~ "Unknown"))
+       
+table(bondseries2$fed_taxed)
+#23, 180, 1339
+#57 246 1239 as of June 29
+```
+
+
+
+# Merged Data - Descriptive Stats!
+
+After creating the variables for the grouped bond series above, we can merge them back to larger data set of individual bonds at the CUSIP level of observation. This will take all the categorical info created and apply it to each individual bond within a bond series. 
+
+```{r rejoining}
+# write_csv(bondseries2, "bondseries_coded.csv")
+
+joined <- left_join(cities_keep, bondseries2, c("city","issue_details","security_description", "issue_date", "official_statement"))
+
+joined_filtered <- joined %>%  # doublecheck that all of our filtering still applies
+  filter(principle_amount_at_issuance > 0,
+         ref_string == "Keep",
+         maturity_date <= '2062-01-01')  %>%
+      mutate(issue_year = year(issue_date))
+# joined == joined_filtered. same number of observations, this is good.
+```
+
+Made a list of unique issue_details. This shows first 6 as an example. `obs` is number of times the issue_detail shows up in the data.  There are 1290 unique issue_details found. 
+
+```{r}
+issuedetails_list <- cities_keep %>% 
+  group_by(issue_details) %>% 
+  summarize(obs = n()) %>%
+  select(obs,issue_details)
+
+head(issuedetails_list, 6)  #1290 obs
+```
+
+If we wanted to look at just the issuers, we can group by `issuer` and count the number of times each issuer appears in the dataset (`obs`). There are 94 issuers within the 5 cities (but many of them are very similar in name and probably are the same entity). 
+
+
+```{r issuers}
+issuer_list <- joined_filtered %>% 
+  group_by(issuer) %>% 
+  summarize(obs = n())
+
+head(issuer_list, 6) #94 issuers
+
+
+```
+
+
+## Graphs
+
+After data cleaning, 9283 observations are used in the graphs and tables below. 
+```{r graph}
+joined_filtered %>% 
+  group_by(city) %>% 
+  ggplot() + 
+  geom_col(aes(principle_amount_at_issuance/1000000000, y = city))+
+  labs(title = "Total Muni bonds per city since 2000", subcaption = "", caption = "caption", 
+       x = "Billions of Dollars", y = "")
+```
+
+Year for the cutoff in the graphs and descriptive stats is 2052. DC had 1 bond series that goes to 2062, but we want a similar comparison between the cities.
+
+```{r maturity-due}
+joined_filtered %>% 
+  filter(maturity_year <= 2052) %>%
+  group_by(city, maturity_year) %>%
+  summarize(year_amount_due = sum(principle_amount_at_issuance, na.rm = TRUE)) %>%
+  ggplot(aes(x=maturity_year, y=year_amount_due/1000000) )+ 
+  geom_line() + 
+  facet_wrap(~city) +
+  labs(title = "Yearly Principle Due for New Bond Series", subtitle = "2000 - 2052", 
+       caption = "Reflects Yearly payment schedule for each city. 
+       Note: Fiscal years and calendar years may not be the same.
+       Source: EMMA official statments - only new bond series.", 
+       x = "Maturity Date", y = "Millions of Dollars")
+```
+
+> NOTE: Our data starts with bonds ISSUED in year 2000. Bonds issued BEFORE 2000 were not included, so graphing maturity dates does not include bonds issued before 2000 that were still being paid for during the timeframe.
+
+
+```{r issue-date-graphs}
+joined_filtered %>% 
+    mutate(issue_year = year(issue_date)) %>% 
+  group_by(city, issue_year) %>%
+  summarize(year_amount_due = sum(principle_amount_at_issuance, na.rm = TRUE)) %>%
+  ggplot(aes(x=issue_year, y=year_amount_due/1000000) )+ 
+  geom_line() + 
+  facet_wrap(~city) +
+  labs(title = "New Bonds Issued Each Year", subtitle = "Jan. 2000 - March 2021", 
+       caption = "Note: Fiscal years and calendar years may not be the same.
+       Source: EMMA official statments - only new bond series.", 
+       x = "Maturity Date", y = "Millions of Dollars")
+
+```
+```{r}
+joined_filtered %>% 
+  group_by(city, issue_year, use_of_proceeds_issuedetails) %>%
+  summarize(usage_sum = sum(principle_amount_at_issuance, na.rm = TRUE)) %>%
+  ggplot(aes(x=issue_year, y=usage_sum/1000000, fill=city) )+ 
+  geom_col() + 
+  facet_wrap(~use_of_proceeds_issuedetails) +
+  labs(title = "Sum of Bonds for Use of Proceeds", subtitle = "Jan. 2000 - March 2021", 
+       caption = "Note", 
+       x = "Year Bond Series Issued", y = "Millions of Dollars")
+```
+
+
+```{r}
+joined_filtered %>% 
+ # group_by(city, issue_year, use_of_proceeds_issuedetails) %>%
+ # summarize(usage_sum = sum(principle_amount_at_issuance, na.rm = TRUE)) %>%
+  ggplot(aes(x=housing, y=principle_amount_at_issuance/1000000, fill = city) )+ 
+  geom_col()+coord_flip()
+```
+
+## Tables
+
+__Coded CUSIP Counts: Use of Proceeds and Bond Type (GO, Rev, or Other bond type)__
+
+Note: This is the number of ungrouped observations for each unique CUSIP (n>9000). Logically, there should be many more observations seen for this table compared to the table below that represents the grouped bond series.
+```{r}
+table(joined_filtered$use_of_proceeds_issuedetails, joined_filtered$rev_GO)
+```
+
+__Bond Series Counts: Use of Proceeds and Bond Type (GO, Rev, or Other bond type)__
+
+Note: This is the number of GROUPED observations that represent each bond series (n>1500). 
+```{r}
+table(bondseries2$use_of_proceeds_issuedetails, bondseries2$rev_GO)
+
+```
+
+
+
+__Grouped Bond Series: Use of proceeds and if it is taxed__
+```{r}
+table(bondseries2$use_of_proceeds_issuedetails, bondseries2$fed_taxed)
+
+```
+
+## Descriptive Stats
+
+
+```{r}
+# if missing, code one way, if not missing, then series?
+hist(cities_keep$coupon)
+#bondseries2$coupon_type <- cities_keep %>% mutate(coupon_type = ifelse(coupon == NA, "Term", ""
+           
+hist(cities_keep$price_yield)
+
+hist(cities_keep$principle_amount_at_issuance)
+                                                            
+```
+
+
+```{r}
+#stats::xtabs(city~moodys, joined_filtered)
+
+#descr::CrossTable(moodys~city , data=joined_filtered )
+
+table(joined_filtered$moodys, joined_filtered$city)
+
+table(joined_filtered$kbra, joined_filtered$city)
+
+table(joined_filtered$s_p, joined_filtered$city)
+#library(psych)
+#library(DescTools)
+
+
+descr::CrossTable(joined_filtered$kbra, joined_filtered$city, prop.r = FALSE, prop.c = FALSE, prop.t = FALSE, prop.chisq = FALSE)
+
+
+descr::CrossTable(joined_filtered$housing, joined_filtered$city, prop.r = FALSE, prop.c = FALSE, prop.t = FALSE, prop.chisq = FALSE)
+
+
+#table(joined_filtered$rev_GO)
+
+descr::CrossTable(joined_filtered$rev_GO, joined_filtered$city, prop.r = FALSE, prop.c = FALSE, prop.t = FALSE, prop.chisq = FALSE)
+
+```
+
+
+
+
+
+
+# Recoding Categorical Variables
+
+Some of the variables can be enhanced with other variables we created. For example, if a bond is a Build America Bond, then it is Federally Taxable. If a bond is for sports facilities, infrastratructure repairs, or investor led housing then it is probably taxable.
+
+```{r}
+recoded <- bondseries2 %>% mutate(taxed = ifelse(BABonds == "Build Amer. Bonds", "Taxable", fed_taxed ))
+table(recoded$taxed)
+```
+
+# Definitions and Notes
+
+Revenue bonds used to yield more than GO bonds.
+
+__Types of credit pledges on GO bonds:__
+- GOs backed by a dedicated tax pledge as well as unlimited taxing authority. Usually uses property tax and backup tax options if first revenue source isn't enough. ex. Increase property taxes to pay for school district bond.
+
+- GOs backed by unlimited taxing authority, with no dedicated tax. Pays bondholders from general revenue fund. If the general revenue fund can't cover debt service, then the city must raise taxes.
+
+- GOs backed by limited taxing authority. Details in bond offering statement.
+
+
+Primary vs secondary market: New issues are primary, secondary market includes trades in securities,refunding, refinancing,
+
+Securities: Can be notes, stocks, bonds, and other forms of evidence of indebtedness.   
+- Types of Notes:     
+  - Bond anticipation notes-capital projects by government   
+  - commercial paper   
+  -    
+  
+
+A municipal bond is categorized based on the source of its interest payments and principal repayments. A bond can be structured in different ways, offering various benefits, risks, and tax treatments. 
+
+__Bond details and potential variables:__
+
+Types of Bonds:     
+- Term Bonds: bonds of an issue mature on a single date (i.e. not a series of dates)   
+- Series: Parts are due on different days    
+
+```{r}
+# if count = 1, then it is a term bond? if 2 or greater, then it is a series? 
+```
+
+
+ 
+
+
+Coupon type can be Fixed, Variable.
+
+
+
+
+## CUSIP Numbers
+
+    -   Issuer is identified by first 6 numbers (company, municipality, agency)
+    -   7 and 8th digit is for type of instrument (equity or debt). Identifies issues within the issuer. 
+    -   Final digit doesn't mean much and is sometimes left out by other institutions.
+
+## Public, private, or Nonprofit
+
+> NOT FINISHED but has potential
+
+A municipal bond is a debt obligation issued by a nonprofit organization, a private-sector corporation, or another public entity using the loan for public projects such as constructing schools, hospitals, and highways.
+
+-   A general obligation bond (GO) is issued by governmental entities and not backed by revenue from a specific project, such as a toll road. Some GO bonds are backed by dedicated property taxes; others are payable from general funds.
+
+- If GO bond, then issued by government. _right?_
+
+```{r}
+table(bondseries2$rev_GO) 
+```
+
+If revenue bond, private or nonprofit partnerships are used:
+
+-   A revenue bond secures principal and interest payments through the issuer or via sales, fuel, hotel occupancy, or other taxes. When a municipality is a conduit issuer of bonds, a third party covers interest and principal payments. Revenue bonds are more vulnerable to changes in consumer tastes or general economic downturns than GO bonds. For example, a facility delivering water, treating sewage, or providing other fundamental services has more dependable revenue than a park's rentable shelter area. Go bonds are the most secure bond types for making sure they get their money back from the government. Rev bonds depend on the investment making money to repay the bonds.
+
+    -   anticipation note: short term debt where principal and interest is paid on a specific date. Usually very short term, ex. 1 year or less.
+    
+### Taxation
+
+Income generated by a municipal bond may be taxable. For example, a municipality may issue a bond not qualified for federal tax exemption, resulting in the generated income being subject to federal taxes.
+
+
+TAXABLE MUNICIPAL BOND -- A municipal bond that has interest which is subject to federal income tax. An issuer may issue a taxable bond because: it is financing activities that would not qualify for tax- exemption.
+
+- Municipal bonds can generate tax-free income for qualified residents but pay lower coupon (interest) rates as a result compared with taxable bonds.   
+
+- AMT implies a tax liability  
+
+```{r eval = FALSE}
+cities_keep%>%
+  group_by(fed_taxed)%>% # based on amt string in bond details
+  summarise(avg_coupon_rate = mean(coupon, na.rm=TRUE))
+```
+
+_Very simplified calculation that probably leaves out a lot of variables does not support the statement above. ALSO, taxable and not taxed are not always clarified in bond details. Would need to find other variables tht predict if taxed or not. _
+
+
+**AMT vs Non-AMT bonds**
+
+TAX-EXEMPT BOND -- A municipal bond the interest on which is excluded from income for federal income tax purposes. Such interest may, or may not, be exempt from state or local taxation. Generally, municipal bond interest is exempt from tax because the bond is being used to finance a governmental activity. Also, interest on federal bonds is exempt from state and local tax.
+
+Non-AMT means it is not federally taxed (aka "tax exempt"). AMT creates a tax liability. Private activity municipal bonds are subject to federal tax but securities sold by state and local governments are not taxed on the interest earned.
+
+> update this: 8383 are not taxed based on this coding, 906 are taxed BUT _-I would not trust this coding__. Many observations don't specify taxation in their variable descriptors.
+
+
+
+```{r}
+table(cities_keep$fed_taxed)
+table(cities_keep$city, cities_keep$fed_taxed)
+
+```
+
+
+   
+
+#### Tax Except Facility Bonds
+
+EXEMPT FACILITY BOND -- A private activity bond that is considered a qualified tax-exempt bond because it finances one of 15 specific facility types. While technically benefitting a private business (or private businesses), these exempt facilities generally serve a public function. These include:
+
+(1) airports,
+(2) docks and wharves,
+(3) mass commuting facilities,
+(4) facilities for the furnishing of water, (5) sewage facilities,
+(5) solid waste disposal facilities,
+(6) qualified residential rental projects,
+(7) facilities for the local furnishing of electric energy or gas,
+(8) local district heating or cooling facilities,
+(9) qualified hazardous waste facilities,
+(10) high-speed intercity rail facilities,
+(11) environmental enhancements of hydroelectric generating facilities,
+(12) qualified public educational facilities,
+(13) qualified green building and sustainable design projects, or
+(14) qualified highway or surface freight transfer facilities.
+
+```{r}
+table(bondseries2$FAC_bonds )
+```
+
+-   As a fixed-income security, the market price of a municipal bond fluctuates with changes in interest rates: When interest rates rise, bond prices decline; when interest rates decline, bond prices rise.
+
+```{r}
+summary(as.numeric(cities_keep$price))
+
+```
+
+__Capital appreciation bonds__ 
+
+CABs are distinct from traditional zero coupon bonds because the investment return is considered to be in the form of compounded interest rather than accreted original issue discount. For this reason only the initial principal amount of a CAB would be counted against a municipal issuer’s statutory debt limit, rather than the total par value, as in the case of a traditional zero coupon bond
+
+
+# Quality Check
+
+Checked: [https://emma.msrb.org/EP366288-EP287608-EP682855.pdf](https://emma.msrb.org/EP366288-EP287608-EP682855.pdf)
+
+Official Statement has 5 bonds (not bond series but singular bonds with large values) listed at the top, all are tax allocation bonds for beltline projects, Series 2008A-C and 2009B-C. BUT only 2009B & C are associated with the offical statement link in the data.
+
+I searched one of the missing bonds (CUSIP 047849CR3) that is listed in the official statement but not included in the web scraped data from the EMMA website. 
+
+
+
+
+**Checked** (https://emma.msrb.org/MS276010-MS273856-MD555629.pdf) and it says NOT a new issue at the top. Details state that these are refinanced 1999 bonds.
+- This official statement is also a duplicate observation; one has an official statement link, the other does not. They both have the same  date and par value. 
+
+> Supports dropping observations that are missing official statements? Idk what to do about the one that has the OS though. 
+
+
+
+
+### Duplicates
+```{r dupcheck1}
+bondseries <- as_data_frame(bondseries)
+bondseries %>% count(duplicated(summed_principal)) 
+bondseries %>% select(c(summed_principal)) %>% janitor::get_dupes()
+# most are pretty normal numbers so not too surprising that there are duplicates. Any really specific numbers would be a red flag.
+```
+
+These duplicates are concerning:
+
+```{r dupcheck2}
+bondseries %>% select(-c(official_statement, issue_details, security_description)) %>% janitor::get_dupes()
+```
+
+__Checked__ pdf(https://emma.msrb.org/ES797467-ES626859-ES1022402.pdf): 
+CUSIP = 04785VAT1. Issued in 2014, remarketed in 2016.
+
+__Checked__ [Atlanta 2004A and 2004B](https://emma.msrb.org/MS228987-MS204295-MD396930.pdf). This link does not appear to have CUSIP numbers on the pdf statement...
+
+CUSIP searched on EMMA = 047772KR8.
+This pdf link was found by searching the cusip 047772KR8 on the EMMA website since the OS link was not included in the webscraped data. OS link says bond series was equal to $55.5 million total (8 Mil for A, 47.5 Mil for B). I searched "47500000" in the bond series dataframe to see if a series had been summed up to equal the same thing, even if it didn't have an OS link. Search returned issue_details = Atlanta GA Pub improvement-SER B. This appears to match, which is a good thing. Series A does not appear anywhere. 
+
+Did some more digging through the Emma site to find the Var. Purp. Series 2004A bond series. Took a specific cusip (047772JT6) from the series on the website and searched it in our data. Found observation that had this [OS link](https://emma.msrb.org/MS257199-MS232507-MD453352.pdf).
+Also searched 047772KD9, also in Series A, to check it out more. OS goes to same link, which is actually for a 2007 Series of 8 million.
+
+> Although this bond series does not have an official statement, it does not appear to be a duplicate observation for one that does have an OS.
+Series B is included in data, but series A does not appear to be?
+
+
+```{r}
+#write_csv(joined_filtered, "munibonds_June30_AWM.csv")
+```
