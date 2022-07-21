@@ -1,0 +1,787 @@
+---
+title: "Muncipal Bonds Data - Quality Check"
+author: "Alea Wilbur"
+date: "June 22 2022"
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, tidy = TRUE)
+
+library(ggplot2)
+library(readxl)
+library(tidyverse)
+library(DT)
+#library(data.table)
+library(janitor)
+library(stringr)
+library(lubridate)
+
+
+```
+
+# Early Data Cleaning and Merging
+
+When the original 5 excel files are merged together and include both "NEW" and "REF" bond observations, there are 17,251 observations.
+
+```{r initial-files, warning = FALSE, message=FALSE}
+
+#excelfiles<- c("1_ATL Database 8.15.xlsx", "2_Boston Database 8.15.xlsx", "3_Chicago Database 8.15.xlsx", "4_DC Database 8.15.xlsx", "5_SF Database 8.15.xlsx")
+
+atlanta <- read_excel("1_ATL Database 8.15.xlsx", sheet = "Bond Table") %>% 
+  clean_names() %>% 
+  select(city:issue_date, official_statement, archived_doc)%>%
+  mutate(issue_date = as.Date(issue_date, "%Y/%M/%D"),                    maturity_date = as.Date(maturity_date, "%Y/%M/%D"))
+
+boston <- read_excel("2_Boston Database 8.15.xlsx", sheet = "Bond Table") %>% 
+  clean_names() %>% 
+    select(city:issue_date, official_statement, archived_doc)%>%
+  mutate(issue_date = as.Date(issue_date, format = "%Y/%M/%D"),                                                                  maturity_date = as.Date(maturity_date, format = "%Y/%M/%D"))
+
+chicago <- read_excel("3_Chicago Database 8.15.xlsx", sheet = "Bond Table")%>% 
+  clean_names() %>% 
+    select(city:issue_date, official_statement, archived_doc)%>%
+  mutate(issue_date = as.Date(issue_date), # changed 3 observations to match formatting
+         maturity_date = as.Date(maturity_date, format = "%Y/%M/%D"))
+
+dc <- read_excel("4_DC Database 8.15.xlsx", sheet = "Bond Table") %>% 
+  clean_names() %>% 
+    select(city:issue_date, official_statement, archived_doc)%>%
+  mutate(issue_date = as.Date(issue_date), #manually reformatted 4 observations (323, 1788,4282,4283)
+         maturity_date = as.Date(maturity_date))
+
+sanfran <- read_excel("5_SF Database 8.15.xlsx", sheet = "Bond Table") %>% clean_names() %>% 
+    select(city:issue_date, official_statement, archived_doc)%>%
+  mutate(issue_date = as.Date(issue_date, "%Y/%M/%D"),                                                                             maturity_date = as.Date(maturity_date, "%Y/%M/%D"))
+
+cities <- rbind(chicago, boston, atlanta, dc, sanfran)%>%  # 17251 observations without filter (new and refinanced bonds)
+  mutate(issue_date = as.Date(issue_date), # had problems with issue_date being logical class
+         official_statement = ifelse(official_statement == "0", "No official statement is currently available.", official_statement),
+         os_missing = ifelse(official_statement == "No official statement is currently available.", "Missing", "Included"),
+         principle_missing = ifelse(as.numeric(principle_amount_at_issuance)<0 | is.na(principle_amount_at_issuance) | principle_amount_at_issuance == "NA", "Missing",   "Included") ) %>% 
+ # filter(cp_mapping == "NEW") %>%
+  arrange(issue_details)
+# 17260 observations
+
+cities <- cities %>% 
+  mutate(principle_amount_at_issuance = as.numeric(principle_amount_at_issuance),
+         coupon = as.numeric(coupon),
+         price_yield = as.numeric(price_yield),
+         price = as.numeric(price)
+)
+
+class(cities$issue_date) # Date before writing and reading in CSV, logical afterwards
+
+#write.csv(cities, "munibonds_allobservations_FINAL.csv")
+
+```
+
+#### Missing Principle Values Table
+
+Reading in munibonds_allobservations.csv, there are 17,260 observations. These are unique CUSIPs for each bond within the bond series. Bonds within the same bond series may have different principle values, coupon rates, etc.
+
+Over 1800 observations do not have principle values. After randomly checking links and looking for patterns within missing data, these observations will ultimately be dropped from the analysis.
+
+```{r}
+
+#cities <- read_csv("munibonds_allobservations.csv") 
+#17260 for all obs
+#cities2 <- read_csv("munibonds_allobservations_FINAL.csv") 
+
+
+cities %>% 
+  group_by(city, principle_missing)%>% 
+  summarize(count = n()) %>%
+  pivot_wider(names_from = principle_missing, values_from = count) 
+
+
+```
+
+#### Keep only NEW bond series
+
+After closer inspection of the variables, it appears that original coding for refinancing did not fully capture all forms of refinancing bonds. To address this, I made a dummy variable for if issue_details and security_description contained "REF", "RMKT, "RFND" in the description called `ref_string`.
+
+-   6435 obs of 17,000+ observations have some sort of refinancing word in the details. Most are coded as REF, but not all of them. RMKT was a type of refinancing that was missed originally.
+
+**Example of incorrect CP_MAPPING code**: <https://emma.msrb.org/EP309827-EP21452-EP643465.pdf>. Specifically says "Not a new issue" and has original issuance and remarketing dates. CP_Mapping was coded as "NEW" but should be "REF". Probably was miscoded from it saying "remarketing" instead of "refinancing"?"
+
+**Missing Data Random Check**: Missing official statement, has principle values\
+- Example 1. It does have an archived official statement [link](https://emma.msrb.org/ER952184-ER744873-ER1146555.pdf). CUSIPS = 2548395C3 and 254839P72. It has 2 observations that have the same issue_date, principle, maturity date, etc. The `Security Description` for one contains "RMKT" and the other looks like it is the original.
+
+-   Example 2. Similar case for CUSIPS [2548395E9 and 254839J46](https://emma.msrb.org/ER952188-ER744875-ER1146557.pdf). One has missing value for principle, other looks like it is correct. The observation with missing values has RMKT in its description details.
+
+*Supports finding descriptions that contain RMKT and dropping those observations. Many observations with RMKT are missing principle values and would be dropped anyways.*
+
+Refunding/refinancing bonds, remarketing, and revenue refinancing were all coded as a type of refinancing in the new variable `ref_string`. If observations were previously coded as REF, they remained coded as REF in `ref_string`. If issue_details or security_description contained those descriptors, they were (re)coded as REF; if not, they were coded as Keep. **10815 observations**. Then only observations with values greater than zero were kept **(n=9347)** in the dataset and were considered "Keep-able". These are non-grouped observations. After grouping bond series and summing par values, there were **1387 groups that are considered New bonds series**. See code below.
+
+
+My additional coding for refinancing, refunding, and remarketing identfied another 521 observations that should be removed from new bond series dataset. 
+
+
+```{r removing-refinancing}
+cities_keep <- cities %>%
+  mutate(
+    ref_string = case_when(
+      str_detect(`issue_details`, c('REMARKET|RMKT')) ~ "Remarket",
+      str_detect(`issue_details`, c('REFUNDING|REF BD|RMKT|RFDG|REV REF')) ~ "Ref",
+      str_detect(`security_description`, c('REFUNDING|REF BD|RFDG|REV REF'))~ "Ref",
+     str_detect(`security_description`, c('REMARKET|RMKT'))~ "Remarket",
+      TRUE ~ "Keep"),
+    ref_string = ifelse(cp_mapping == "REF", "REF", ref_string)
+  )
+
+  
+table(cities_keep$ref_string)
+#10815 KEEP, 6435 REF
+#10807 after adding "remarket" and  "refunding" to grepl
+
+
+# keep New bond series observations with principle values greater than 0
+cities_keep <- cities_keep %>% 
+  filter(principle_amount_at_issuance > 0,
+         ref_string == "Keep")
+# 9347 observations after filtering for >0 values. Not grouped
+# 9294 after filtering edits
+
+cities_keep_grouped <- cities_keep %>% 
+  group_by(city, issue_date,issue_details,security_description, official_statement) %>% 
+  summarize(parvalue = sum(principle_amount_at_issuance, na.rm = TRUE)) %>% 
+  arrange(parvalue)
+# 1387 groups
+# 1547 after adding city, issue_date, issue_details
+
+datatable(cities_keep_grouped)
+# missing many of the variable details needed later. Add more to group_by variable
+```
+
+#### Issuers and Issue Details Lists
+
+If looking at only "keepable" bond observations (i.e. value greater than 0 and checked for remarketing and refinancing text in variables), then there are 1296 unique bond issue_details and 94 unique issuers in the 5 selected states.
+
+```{r}
+issuedetails_list <- cities_keep %>% 
+  group_by(issue_details) %>% 
+  summarize(obs = n())
+
+head(issuedetails_list, 6)  #1305 obs
+
+issuer_list <- cities_keep %>% 
+  group_by(issuer) %>% 
+  summarize(obs = n())
+
+head(issuer_list, 6) #94 issuers
+
+```
+
+**Refinancing Random Check** CUSIP 04780MBL2 [link](https://emma.msrb.org/MS22891-MS249216-MD483741.pdf)\
+- QUESTION: Is this considered refinancing?\
+- ANSWERED: Yes and no. There are bond series mentioned in this official statement that involve refinancing BUT only Series B is included in the NEW bond series data, which is a good thing. Series A is considered refinancing
+
+-   Official statement includes multiple bond series but NEW observations include only Series B\
+-   When searching link in all NEW + REF observations, there are 48 observations with this official statement link. Only 10 of these are NEW.\
+-   Page 49 has the bond info we want: Airport General Revenue Bonds Series 2000 B (AMT). Totals \$201,955,000 which perfectly matches the summed par value of the remaining NEW observations. 04780MBN8, 04780MBR9, 04780MBS7 are Term Bonds, the rest are Series bonds. Yield values in data are included and correct. This is good!
+
+*This random check increases trust in original categorizations of refinancing vs new bond series coming from the same official statement.*
+
+## Duplicates
+
+Using `count(duplicated(cusip))`, we find 2 cases of "easy to find" duplicate CUSIP Numbers. 
+
+> To do: Inspect and remove.
+
+```{r easy-duplicates}
+cities_keep %>% count(duplicated(cusip)) 
+
+cities_keep %>% select(-c(issue_details)) %>% janitor::get_dupes()
+```
+
+# Data Cleaning Decisions
+
+**Principle values:**
+
+-   Keep observations that have principle values greater than zero.\
+
+-   After filtering for observations that had principal values greater than zero, there were 9,347 remaining observations, of which 762 have unique official statements. Each linked document can have one or more bond series or fixed term bonds within it.
+
+    -   8149 rows have an official statement link AND a dollar amount in the data. These observations were saved as `notmissing`. Of these, there are still 762 unique official statement links and bond agreements (there are more than 762 bond series since there can be more than 1 series in a pdf link). If I were to manually collect data for each bond series for documents where text scraping did not work, I would be looking at around 800 documents. However, I can hopefully use grepl() commands on security_description and issue_details to pull bond details in the text.
+
+```{r}
+cities_keep %>% group_by(official_statement) %>% summarize(Count = n()) %>% DT::datatable()
+```
+
+**Missing Official statements:**
+
+-   For `cities_keep`, there are over 1000 observations missing official statements. The count of observations missing official statements per city and the total par value (for those that had principal values) is summed below.
+
+```{r missing-OS}
+d <- cities_keep %>% filter(os_missing == "Missing") %>% 
+  group_by(city) %>%         
+  summarize(ParValue = sum((principle_amount_at_issuance), na.rm = TRUE), 
+          BondCount = n() ) %>% data.frame()
+datatable(d)
+```
+
+
+__Bond series that are not missing official statements.__    
+
+- Observations grouped by city, issue details, and security description. ParValue is the sum of all principle values for that grouped bond series and bond count is the number of observations in each group (i.e. if the count = 20, there are 20 observations with their own principle values within that bond series).
+
+```{r not-missing-OS}
+# grouped observations for not missing
+library(kableExtra)
+
+cities_keep %>% 
+  filter(os_missing != "Missing") %>% 
+  group_by(city, issue_details, security_description) %>%  
+  summarize(ParValue = sum((principle_amount_at_issuance)), 
+          BondCount = n() ) %>%
+  arrange(ParValue) %>% #datatable()
+  kable(format = "html", caption = "Bond series that are not missing official statements. Observations grouped by city, issue details, and security description.") %>%
+    scroll_box(width = "100%", height = "400px")
+
+# 1198 observations have official statements
+# 388 groups have official statements
+# 1078 groups do not official statements
+
+```
+
+Based on randomly checking observations that had missing official statements and/or principle values, it appears that many of the missing variables are missing for a good reason. They are either a form of duplicates (remarketing, refinancing, refunding, etc.)
+
+There are 1606 observations without principles and without official statements. When grouped, there are 902 bond series missing official statements and par values. Observations with missing principle values and missing official statements were saved as a separate data frame named `missing_grouped` in case I wanted to examine them again later:
+
+```{r missingdata-grouped}
+missing_grouped <- cities %>%
+  filter(principle_missing == "Missing" & os_missing == "Missing") %>%
+  # 1606 observations missing principle values AND official statements
+  group_by(issue_details, issue_date, security_description, city, cp_mapping ) %>%
+  summarize(par_value = sum(as.numeric(principle_amount_at_issuance), na.rm = TRUE) ) %>%
+    select(issue_date, cp_mapping, city, issue_details, security_description ) 
+
+datatable(missing_grouped)
+# 902 missing  groups that are missing both principle values and official statement links. 
+```
+
+
+Most official statements have multiple series within them. Looked at duplicated official statement links. 762 FALSE: unique official statements,8585 TRUE: number of official statement dups.
+
+When including only Keep observations, there are 762 unique official statements. There are 1062 unique official statements when all observations are included. Reminder: many official statements have multiple series (e.g. Series A, Series B, Series C, etc.).
+
+```{r warning = FALSE, message=FALSE}
+
+cities_keep %>% count(duplicated(official_statement))
+
+# 762 FALSE: unique official statements
+# 8587 TRUE: number of official statement dups
+```
+
+## Examining Data: Graphs
+
+When data are grouped by issue_details and official_statement links, there are 1305 unique combinations where the summed value of these groups represents the total par value of all bond series within an official statement.
+
+```{r barchart-table, error=TRUE}
+cities_keep %>% 
+  group_by(issue_details, official_statement, .groups="keep") %>%
+  summarize(par_value = sum(principle_amount_at_issuance)) %>%
+  select(par_value, issue_details, official_statement)#%>%  DT::datatable()
+```
+
+
+```{r barchart1}
+# this is a histogram of total bond par amounts summed together for official statements
+cities_keep %>% 
+  group_by(issue_details, official_statement) %>%
+  summarize(par_value = sum(principle_amount_at_issuance, na.rm=TRUE))  %>%
+  ggplot() + geom_histogram(aes(par_value/1000000))+labs(title = "Official Statement Par Values: New Series only", subtitle = "All Five Cities Combined", caption = "Values grouped by bond issue details and offical statements", x = "Millions of Dollars", y = "Observation Count")
+
+# this is a histogram of summed par values for each series within an official statement. Expectation: smaller par values on x-axis since fewer things are summed together. More observations on y axis when grouping by more variables.
+
+cities_keep %>% 
+  group_by(issue_details, security_description, official_statement) %>%
+  summarize(par_value = sum(principle_amount_at_issuance, na.rm=TRUE))  %>%
+  ggplot() + geom_histogram(aes(par_value/1000000))+labs(title = "Bond Series Par Values: New Series only", subtitle = "All Five Cities Combined", caption = "Values grouped by bond issue details, security descriptions, and offical statements", x = "Millions of Dollars", y = "Observation Count")
+
+
+```
+
+Summed bond values for each city are slightly different depending on if the original `cp_mapping == NEW` from `cities` is used or if `ref_string` was used to create `cities_keep`.
+
+```{r graph-comparison}
+# original refinancing coding:
+cities %>% filter(cp_mapping =="NEW") %>% 
+  group_by(city) %>% 
+  summarize(bond_amount = sum(principle_amount_at_issuance, na.rm=TRUE))  %>%
+  ggplot() + geom_col(aes(bond_amount/1000000, y = city))+labs(title = "All Bonds Summed: Original cp_mapping Coding", subcaption = "Uses original cp_mapping variable = NEW ", caption = "Values summed by grouping at state level from cities data frame using original NEW coding variable", x = "Millions of Dollars", y = "")
+
+# after recoding for remarketing, refunding, refinancing, etc.:
+cities_keep %>% 
+  group_by(city) %>% 
+  summarize(bond_amount = sum(principle_amount_at_issuance, na.rm=TRUE))  %>%
+  ggplot() + geom_col(aes(bond_amount/1000000, y = city))+labs(title = "All Bonds Summed: From cities_keep ", caption = "Values summed by grouping at state level from cities_keep data frame", x = "Millions of Dollars", y = "")
+```
+
+## Unit of Observation
+
+When grouped by only the official statement there are 767 unique official statements This shows the sum of all principle values for an official statement but does not differentiate between bond series. Most official statements have more than one bond series making up the total par value listed on the official statement. Grouping by official statement is not enough detail for descriptive stats and more variables need to be included in the grouping method.
+
+```{r}
+cities_keep %>% group_by(city, official_statement) %>% summarize(Par = sum(principle_amount_at_issuance)) %>% datatable()
+```
+
+When grouped by city, official statement, and issue details, there are 1305 groups. This shows Par amount for all bond series summed together within a bond document. i.e. if an official statement includes 3 bond series (A, B, & C) they will be added.
+
+```{r}
+cities_keep %>% 
+  group_by(city, official_statement, issue_details) %>% 
+  summarize(Par = sum(principle_amount_at_issuance))# %>% datatable()
+```
+
+When grouped by city, issuer, issue details, and Security descriptions, there are 1467 observations. When grouped by city, issuer, official statement, issue details, and security descriptions, there are still 1467 observations. This hopefully shows the par value for each bond series within an official statement. This is good. This grouping should allow us to rejoin data in later steps if needed.
+
+```{r}
+cities_keep %>% 
+  group_by(city, issuer, official_statement, issue_details, security_description) %>% 
+  summarize(Par = sum(principle_amount_at_issuance))
+```
+
+
+
+`final_groups1`, created below, groups by more variables than this and should sum par values for individual bond series if multiple are included within one official statement. This grouping is the most useful for descriptive stats and coding done farther below. 1557 groups are created from this grouping method.
+
+```{r warning =FALSE, message=FALSE}
+
+final_groups1 <- cities_keep %>% 
+  group_by(city, issuer, issue_details, security_description, issue_date, cusip_identifier, official_statement) %>%
+  summarize(par_value = sum(as.numeric(principle_amount_at_issuance), na.rm = TRUE) )%>%
+  arrange(desc(par_value)) %>%
+  select(city, issue_date, par_value,issue_details, security_description, official_statement)
+
+#NEW series
+final_groups1
+#1557
+```
+
+**Grouping Random Check**
+
+The bond document says 8mil for Series 2001A and 61,220,000 for Series 2001B - [link](https://emma.msrb.org/MS187665-MS162973-MD315297.pdf)
+
+Grouped value summed up equals the total amount in the bond document (\$69,220,000). Not grouped, there are 21 observations for this official statement in cities_keep.
+
+> This official statement does not have data in the security description, so it was summed together instead of summing the bond series separately. They are differentiated in the official statement. Both are a type of GO Bond, but the \~61 Million bond is for public improvement specifically.
+
+**Grouping Random Check** official statement [link](https://emma.msrb.org/ER589638-ER458359-ER861159.pdf)\
+- has 3 bonds within 1 official statement pdf for Atlanta Airport (2012A= \$63,695,000; 2012B = \$184,660,000; 20212C = \$225,740,000)\
+- total for all 3 = 474,095,000, according to pdf, matches sum of 3 bond series when grouped.\
+- Each bond series is separated in cities_keep_grouped: this is good!
+
+```{r}
+63695000+184660000+225774000
+```
+
+**Old Grouping Random Check**
+
+[Official Statement](https://emma.msrb.org/EP606188-EP473953-EP874293.pdf) for San Francisco, issued on March 8, 2012. Document includes 3 different bonds. Letters after the CUSIP of 797646 do not align with specific bonds. They go in order down the alphabet with the payments.
+
+Total amount of official statement = \$330,980,000.\
+- \$183,330,000 for 2012A Series\
+- \$73,355,000 for 2012B Series\
+- \$74,295,000 for 2012C Series
+
+Works in Excel pivot tables too: Rows are `city`, `issue_date`, and `issue_details`. Values is sum of `principle_amount_at_issuance`.
+
+> If you group by issue_date and issue_details, you will get the the total par value for ALL bond series listed within an official statement. The issue_details differentiates between the bond series and would allow the total bond value to be summed. Security_description adds one more grouping variable for separting bond series within an official statement.
+
+```{r all-vs-keep-comparison}
+final_allobs <- cities %>% 
+  group_by(city, issue_details, security_description, official_statement, issue_date,  cp_mapping ) %>%
+  summarize(par_value = sum(as.numeric(principle_amount_at_issuance), na.rm = TRUE) ) %>%
+    select(issue_date, par_value, city, cp_mapping, issue_details, security_description,  official_statement) %>%
+arrange(issue_details)
+
+final_allobs #3492 bond series groups
+
+final_keepobs <- cities_keep %>% 
+  group_by(city, issue_details, security_description, official_statement, issue_date) %>%
+  summarize(par_value = sum(as.numeric(principle_amount_at_issuance), na.rm = TRUE) ) %>%
+    select(issue_date, par_value, city, issue_details, security_description,  official_statement) %>%
+arrange(issue_details)
+
+final_keepobs #1557 bond series groups
+
+#write_csv(final_keepobs, "grouped_bonddata.csv")
+```
+
+New bond series only:
+
+```{r}
+cities_keep %>% 
+  group_by(city, maturity_date) %>%
+  summarize(amount_due = sum(principle_amount_at_issuance, na.rm = TRUE)) %>%
+  ggplot(aes(x=maturity_date, y=amount_due/1000000) )+ 
+  geom_line() + 
+  facet_wrap(~city) +
+  labs(title = "Principle Due per Month: New Bond Series", subtitle = "Line Graph", caption = "Values not summed by month or year. Based only on maturity_date from official statements.", x = "Maturity Date", y = "Millions of Dollars")
+
+library(lubridate)
+cities_keep %>% 
+  mutate(maturity_month = month(ymd(maturity_date)),
+         maturity_year = year(ymd(maturity_date))) %>% 
+  group_by(city, maturity_year) %>%
+  summarize(year_amount_due = sum(principle_amount_at_issuance, na.rm = TRUE)) %>%
+  ggplot(aes(x=maturity_year, y=year_amount_due/1000000) )+ 
+  geom_line() + 
+  facet_wrap(~city) +
+  labs(title = "Principle Due per Year", caption = "Reflects payment schedule for each city. Data includes new bonds, not refinanced bonds, based on EMMA official statments.", x = "Maturity Date", y = "Millions of Dollars")
+
+
+```
+
+> Outlier alert. Only keep observations before 2063. Drops 1 bond series, described below.
+
+-   Observations associated with [this](https://emma.msrb.org/ER785601-ER610965-ER1013035.pdf) link go until 2114 for a DC water & Sewer project that uses \$350 million federally taxable green bonds.
+
+```{r graph-after1962, error=TRUE, message=FALSE}
+
+cities_keep %>% 
+  filter(maturity_date <= '2062-01-01') %>% # 40 years into future
+  mutate(maturity_year = year(maturity_date)) %>% 
+  group_by(city, maturity_year) %>%
+  summarize(year_amount_due = sum(principle_amount_at_issuance, na.rm = TRUE)) %>%
+  ggplot(aes(x=maturity_year, y=year_amount_due/1000000) )+ 
+  geom_line() + 
+  facet_wrap(~city) +
+  labs(title = "Yearly Principle Due for New Bond Series", subtitle = "Amount due based on yearly maturity dates from 2000 - 2062", caption = "Reflects Yearly payment schedule for each city. 
+       Source: EMMA official statments - only new bond series.", x = "Maturity Date", y = "Millions of Dollars")
+```
+
+# Coding Use of Proceeds
+
+> This was my first attempt at coding the variables. Please see useofproceeds.rmd for the more concise and correct version of coding the variables after cleaning them. 
+
+```{r}
+cities_keep <- cities_keep %>% 
+  filter(maturity_date <= '2062-01-01') %>% # 40 years into future
+  mutate(maturity_year = year(maturity_date))
+
+#write_csv(cities_keep, "cities_keep.csv")
+```
+
+Note: `Cities` includes ALL observations. `cities_keep` includes only new bond observations (i.e. not refinancing, refunding, remarketing, etc.)
+
+
+Use grepl() on variables to find and categorize strings in grouped data. (Could use grepl on non-grouped observations, but this was easier to see what was or was not working. Once more confident in code, then maybe apply to ungrouped observations to avoid any potential joining mishaps later on.)
+
+
+The code below leaves around 250 groups without a use of proceeds category.
+
+```{r}
+lastattempt_NEWbonds <- cities_keep %>% 
+  group_by(city, official_statement, issue_details,
+           security_description, issue_date) %>%
+  summarize(summed_principal = sum(as.numeric(principle_amount_at_issuance), na.rm = TRUE) ) 
+# 1557 new bond observations
+# should be same as final_keep
+
+
+NEW_bonds_notmissing <-#NEW_bonds_notmissing2 %>%
+  lastattempt_NEWbonds %>% 
+  mutate(
+    use_of_proceeds_issuedetails = case_when(
+    str_detect(issue_details, c("GO|GO BD|GENERAL OBLI|GEN OB")) ~ "Gen. Oblig.",
+    str_detect(issue_details, c("REV REF|REF BD|RFDG")) ~ "Refinancing/Refunding",
+    str_detect(issue_details, c("MULTIMOD|BRIDGE|BRDG|BELT|TRAN|TRANSPORTATION")) ~ "Capital Improvement",
+    str_detect(issue_details, c("VAR PUR|VARIOUS PUR|GEN PUR|GENERAL PURPOSE"))~ "Gen. or Var. Purpose",
+    str_detect(issue_details, c("PUBLIC UTIL"))~ "Public Utilities",
+    # Public Safety?
+    str_detect(issue_details, c("SAFETY"))~ "Public Safety",
+    str_detect(issue_details, c("AIRPORT|ARPT")) ~ "Airport",
+    str_detect(issue_details, c("ANTIC"))~ "Antic. Notes",
+    str_detect(issue_details, c("DEVELOPMENT AUTHORITY|REDEV|DEV AUTH"))~ "Development/Redevelopment",
+    str_detect(issue_details, c("UNIVERSITY|CAMPUS|UNIV|COLLEGE|SCHOOL|STUDENT|ACADEMY"))~ "Education", 
+    str_detect(issue_details, c("HEALTH|HOSP")) ~ "Health", 
+    str_detect(issue_details, c("MULTIFAMILY| HOUSING|RESIDENTIAL|HSG|APTS|SINGLE FAMILY")) ~ "Housing",
+    str_detect(issue_details, c("PK|PARK|BEACH|ZOO|AQUARIUM|MUSEUM" )) ~ "Parks, Beaches, Museums",      
+    str_detect(issue_details, c("PUB IMP|PUBLIC IMP|IMPVT|IMPT"))~ "Public Improvement",
+    str_detect(issue_details, c("INDL DEV|IND DEV|IND"))~ "Industrial Development",
+    str_detect(issue_details, c("VAR PURP|VARIOUS PURP|GEN PURP|GENERAL PURPOSE")) ~ "Gen. or Var. Purpose",
+    str_detect(issue_details, c("SPORT|STADIUM"))~ "Sports/Stadiums", 
+ #   str_detect(issue_details, c("TRAN|TRANSPORTATION|BELT")) ~ "Transit",
+    str_detect(issue_details, c("WTR|WATER|SEWER|SWR")) ~ "Water & Sewer",
+    TRUE ~ "Unknown"
+  ) )
+
+
+table(NEW_bonds_notmissing$use_of_proceeds_issuedetails)
+
+```
+
+> Probably tried coding too many variables at once in chunk below. Chunk above might be more accurate way to code use of proceeds. Stare at this a lot.
+
+```{r}
+
+NEW_bonds <-
+  lastattempt_NEWbonds %>% 
+mutate(
+  use_of_proceeds_issuedetails = case_when(
+    str_detect(issue_details, c("GO|GO BD|GENERAL OBLI|GEN OB")) ~ "Gen. Oblig.",
+    str_detect(issue_details, c("REV REF| REF BD|RFDG")) ~ "Revenue Refunding",
+    str_detect(issue_details, c("MULTIMOD")) ~ "Capital Improvement",
+    str_detect(security_description, c("VAR PUR|VARIOUS PUR|GEN PUR|GENERAL PURPOSE"))~ "Gen. or Var. Purpose",
+    str_detect(issue_details, c("PUBLIC UTIL"))~ "Public Utilities",
+    # Public Safety?
+    str_detect(issue_details, c("AIRPORT|ARPT")) ~ "Airport",
+    str_detect(issue_details, c("BRIDGE|BRDG"))~ "Bridge",
+    str_detect(issue_details, c("ANTIC"))~ "Antic. Notes",
+    str_detect(issue_details, c("DEVELOPMENT AUTHORITY|REDEV|DEV AUTH"))~ "Development/Redevelopment",
+    str_detect(issue_details, c("UNIVERSITY|CAMPUS|UNIV|COLLEGE|SCHOOL|STUDENT|ACADEMY"))~ "Education", 
+    str_detect(issue_details, c("HEALTH|HOSP")) ~ "Health", 
+    str_detect(issue_details, c("MULTIFAMILY| HOUSING|RESIDENTIAL|HSG|APTS|SINGLE FAMILY")) ~ "Housing",
+    str_detect(issue_details, c("PK|PARK|BEACH|ZOO" )) ~ "Parks and Beaches",      
+    str_detect(issue_details, c("PUB IMP|PUBLIC IMP|IMPVT|IMPT"))~ "Public Improvement",
+    str_detect(issue_details, c("INDL DEV|IND DEV|IND"))~ "Industrial Development",
+    str_detect(issue_details, c("VAR PURP|VARIOUS PURP|GEN PURP|GENERAL PURPOSE")) ~ "Gen. or Var. Purpose",
+    str_detect(issue_details, c("SPORT|STADIUM"))~ "Sports/Stadiums", 
+    str_detect(issue_details, c("TRAN|TRANSPORTATION|BELT")) ~ "Transit",
+    str_detect(issue_details, c("WTR|WATER|SEWER|SWR")) ~ "Water & Sewer",
+    TRUE ~ "Unknown"
+  ) ,
+
+    revbond = case_when(
+      str_detect(issue_details, c("REV BDS|REV")) ~ "Revenue Bond",  
+            TRUE ~ "Not Rev"
+    ),
+    
+    # using only GO BD is not reliable way for identifying GO Bonds. 
+    # Many are GO Bonds without specifying it in details 
+    GObond = case_when(
+          str_detect(issue_details, c("GO |GO BD|GO BOND|GEN OB| GENERAL OB|VARIOUS PURP|VAR PURP")) ~ "GO Bonds",
+          str_detect(security_description, c("GO BD| GO BOND|GEN OB|GENERAL OB|VARIOUS PURP|VAR PURP")) ~ "GO Bonds",
+      TRUE ~ "Not GO"
+    ),
+    
+    bond_type = case_when(
+     str_detect(issue_details, c("REV BDS")) ~ "Revenue Bonds",
+      str_detect(issue_details, c("REF|REFUND|RMKT|RMK")) ~ "Ref/Ref/Rmkt",
+      str_detect(security_description, c("REF| REFUND | RMKT | RMK")) ~ "Ref/Ref/Rmkt",
+      str_detect(issue_details, c("GO BD| GO Bond |GEN OB|GENERAL OB")) ~ "GO Bonds",
+       str_detect(security_description, c("GO BD| GO BOND | GEN OB | GENERAL OB")) ~ "GO Bonds",
+      str_detect(security_description, c("BUILD AMER")) ~ "Build Amer. Bonds",
+      str_detect(issue_details, c("BUILD AMER")) ~ "Build Amer. Bonds",
+      TRUE ~ "Unknown",
+    ),
+    
+    BABonds = case_when(
+      str_detect(security_description, c("BUILD AMER")) ~ "Build Amer. Bonds",
+      str_detect(issue_details, c("BUILD AMER")) ~ "Build Amer. Bonds",
+      TRUE ~ "Unknown"
+      ),
+    
+    
+    rate_type = case_when(
+        str_detect(issue_details, c("FIXED")) ~ "Fixed",
+      str_detect(security_description, c("FIXED")) ~ "Fixed",
+      str_detect(security_description, c("ADJ")) ~ "Adjustable",
+      str_detect(issue_details, c("ADJ")) ~ "Adjustable",
+       str_detect(issue_details, c("VAR")) ~ "Variable",
+       str_detect(security_description, c("VAR")) ~ "Variable",
+      str_detect(issue_details, c("AVR|AUCTION")) ~ " Auction Variable Rate",
+
+    str_detect(issue_details, c("VAR PURP|VARIOUS"))~ "Unknown",
+     str_detect(security_description, c("VAR PURP|VARIOUS"))~ "Unknown",
+    TRUE ~ "Unknown"
+    ),
+    
+    funding_type = case_when(
+      str_detect(issue_details, c("CTFS")) ~ "Collective Investment/CTF",    
+      str_detect(issue_details, c("TAX INCREMENT| TAX ALLO")) ~ "TIF",
+      str_detect(issue_details, c("CAP APPREC") )~ "Capital Apprec",                        
+      str_detect(issue_details, c("MTG")) ~ "Mortgage",
+      str_detect(issue_details, c("LEASE")) ~ "Lease", # only San Fran specifies Leases
+      str_detect(security_description, c("LEASE")) ~ "Lease", # only San Fran specifies Leases
+      str_detect(security_description, c("TAX ANT")) ~ "Tax Anticipation Notes",
+      str_detect(issue_details, c("TAX ANT")) ~ "Tax Anticipation Notes",
+      str_detect(security_description, c("CTFS")) ~ "Collective Investment/CTF",    
+      str_detect(security_description, c("CAP APPREC") )~ "Capital Apprec",                   
+      str_detect(security_description, c("MTG")) ~ "Mortgage",
+      str_detect(security_description, c("VAR")) ~ "Variable Rate",
+      str_detect(security_description, c("TAX INCREMENT")) ~ "TIF",
+    TRUE ~ "Unknown"
+    ),
+    
+    use_of_proceeds_secdesc =  case_when(
+      str_detect(security_description, c("AIRPORT|ARPT")) ~ "Airport",
+      str_detect(security_description, c("BRIDGE|BRDG"))~ "Bridge",
+      str_detect(security_description, c("DEVELOPMENT AUTHORITY|REDEV|DEV AUTH"))~ "Development/Redevelopment",
+      str_detect(security_description, c("UNIVERSITY|CAMPUS|UNIV|COLLEGE"))~ "Higher Ed",       
+      str_detect(security_description, c("MULTIFAMILY HOUSING| RESIDENTIAL|HSG")) ~ "Housing",
+      str_detect(security_description, c("INDL DEV|IND DEV|IND"))~ "Industrial Development",
+      str_detect(security_description, c("PK|PARK|BEACH|ZOO" ))~ "Parks and Beaches",   
+      str_detect(security_description, c("PUB IMP|PUBLIC IMP")) ~ "Public Improvement",
+            str_detect(security_description, c("VAR PUR|VARIOUS PUR|GEN PUR|GENERAL PURPOSE"))~ "Gen. or Var. Purpose",
+      str_detect(security_description, c("WTR|WATER|SEWER|SWR")) ~ "Water & Sewer",
+      TRUE ~ "Unknown"
+      ),
+    
+    fed_taxed = case_when(
+      str_detect(issue_details, 'NON-AMT') ~ 'Not Taxed',
+      str_detect(security_description, 'NON-AMT')~ 'Not Taxed',
+      str_detect(issue_details, "TAXABLE") ~ "Taxable",
+      str_detect(security_description, "TAXABLE") ~ "Taxable",
+      TRUE ~ "Unknown")
+                  )
+
+
+
+table(NEW_bonds$use_of_proceeds_issuedetails)
+# 273 Unknown use of proceeds
+table(NEW_bonds$bond_type)
+table(NEW_bonds$funding_type)
+table(NEW_bonds$revbond)
+table(NEW_bonds$GObond)
+table(NEW_bonds$rate_type)
+table(NEW_bonds$fed_taxed)
+table(NEW_bonds$BABonds)
+table(NEW_bonds$use_of_proceeds_secdesc)
+
+#write.csv(NEW_bonds, "grouped_NEW_addData2.csv")
+
+```
+
+Coupon type can be Fixed, Variable.
+
+Types of Bonds:
+
+-   Term Bonds: bonds of an issue mature on a single dat (i.e. not a series of dates) - Series: Parts are due on different days
+
+Security Code: Lease/Rent Loan Agreement Mortgage Loans Revenue Tax Allocation Unlimited Tax G.O.
+
+Federal Tax: Yes or No
+
+State tax: Yes or No
+
+# Other general comments so far
+
+Boston has price values that are small, like a couple hundred dollars.
+
+-   CUSIP Numbers
+
+    -   Issuer is identified by first 6 numbers (company, municipality, agency)\
+
+    -   7 and 8th digit is for type of instrument (equity or debt). Identifies issues within the issuer.\
+
+    -   Final digit doesn't mean much and is sometimes left out by other institutions.
+
+    -   cusip=167484 for Chicago does not have principal amounts and the archived link takes you to the 2008 Chicago CAFR. Is it included by mistake?
+
+## Definitions and Notes
+
+A municipal bond is categorized based on the source of its interest payments and principal repayments. A bond can be structured in different ways, offering various benefits, risks, and tax treatments. Income generated by a municipal bond may be taxable. For example, a municipality may issue a bond not qualified for federal tax exemption, resulting in the generated income being subject to federal taxes.
+
+Municipal bonds can generate tax-free income for qualified residents but pay lower coupon (interest) rates as a result compared with taxable bonds.
+
+**AMT vs Non-AMT bonds**
+
+Non-AMT means it is not federally taxed (aka "tax exempt"). AMT creates a tax liability. Private activity municipal bonds are subject to federal tax but securities sold by state and local governments are not taxed on the interest earned.
+
+8421 are not taxed based on this coding, 926 are taxed BUT I would not trust this coding. Many observations don't specify taxation in their variable descriptors.
+
+```{r}
+cities5 <- cities_keep %>%
+  mutate(fed_taxed = 
+           case_when(
+    str_detect(issue_details, c(" AMT", "AMT ")) ~ "Taxable",
+    str_detect(security_description, c("TAXABLE"))  ~ "Taxable",
+    TRUE ~ "Not Taxed"
+  ))
+
+
+
+table(cities5$fed_taxed)
+
+```
+
+A municipal bond is a debt obligation issued by a nonprofit organization, a private-sector corporation, or another public entity using the loan for public projects such as constructing schools, hospitals, and highways.
+
+-   A general obligation bond (GO) is issued by governmental entities and not backed by revenue from a specific project, such as a toll road. Some GO bonds are backed by dedicated property taxes; others are payable from general funds.\
+
+-   A revenue bond secures principal and interest payments through the issuer or via sales, fuel, hotel occupancy, or other taxes. When a municipality is a conduit issuer of bonds, a third party covers interest and principal payments.
+
+-   revenue bonds are more vulnerable to changes in consumer tastes or general economic downturns than GO bonds. For example, a facility delivering water, treating sewage, or providing other fundamental services has more dependable revenue than a park's rentable shelter area.
+
+-   revenue bond: bond that is payable from a specific source of revenue. Pledged revenue can come from operation of financed project, grants, taxes, etc.
+
+    -   anticipation note: short term debt where principal and interest is paid on a specific date. Usually very short term, ex. 1 year or less.
+
+-   As a fixed-income security, the market price of a municipal bond fluctuates with changes in interest rates: When interest rates rise, bond prices decline; when interest rates decline, bond prices rise.
+
+-   Bond refinancing or "refunding" are used by state and local governments most frequently to achieve debt service savings on outstanding bonds. Though less frequent, refunding bonds can also be issued to remove or revise burdensome bond covenants or to restructure debt service payments.
+
+Refunding bonds are characterized as either current refundings or advance refundings. A current refunding is one in which the outstanding (refunded) bonds are redeemed within 90 days of the date the refunding bonds are issued. In an advance refunding, the refunded bonds are redeemed more than 90 days from the date the refunding bonds are issued. Changes to federal tax law in late 2017 eliminated the ability of governments to issue tax-exempt advance refunding bonds. Taxable advance refundings of tax-exempt or taxable bonds are still permitted.
+
+Acronym and vocab list [link](https://munibondsforamerica.org/resources/municipal-bond-101-glossary-of-terms/#:~:text=MUNICIPAL%20BOND%20%E2%80%93%20A%20bond%20issued,to%20a%20tax%2Dexempt%20bond).
+
+GENERAL OBLIGATION BOND -- A municipal bond payable from general funds of the issuer. Most general obligation bonds are said to entail the full faith and credit of the issuer.
+
+TAXABLE MUNICIPAL BOND -- A municipal bond the interest on which is subject to federal income tax. An issuer may issue a taxable bond because: it is financing activities that would not qualify for tax- exemption.
+
+TAX-EXEMPT BOND -- A municipal bond the interest on which is excluded from income for federal income tax purposes. Such interest may, or may not, be exempt from state or local taxation. Generally, municipal bond interest is exempt from tax because the bond is being used to finance a governmental activity, just as interest on federal bonds is exempt from state and local tax (See, reciprocal immunity).
+
+EXEMPT FACILITY BOND -- A private activity bond that is considered a qualified tax-exempt bond because it finances one of 15 specific facility types. While technically benefitting a private business (or private businesses), these exempt facilities generally serve a public function. These include:
+
+(1) airports,
+
+(2) docks and wharves,
+
+(3) mass commuting facilities,
+
+(4) facilities for the furnishing of water, (5) sewage facilities,
+
+(5) solid waste disposal facilities,
+
+(6) qualified residential rental projects,
+
+(7) facilities for the local furnishing of electric energy or gas,
+
+(8) local district heating or cooling facilities,
+
+(9) qualified hazardous waste facilities,
+
+(10) high-speed intercity rail facilities,
+
+(11) environmental enhancements of hydroelectric generating facilities,
+
+(12) qualified public educational facilities,
+
+(13) qualified green building and sustainable design projects, or
+
+(14) qualified highway or surface freight transfer facilities.
+
+
+# Redone with original CP mapping
+
+Doing this to make sure that the data cleaning I was doing is even useful.
+
+```{r original-CPmapping}
+table(cities$cp_mapping)
+
+cities_new_cp <- cities %>% filter(cp_mapping == "NEW", ## 11000+ observations with NEW
+                                   principle_amount_at_issuance > 0) %>% # down to 9734 observations with NEW and >0 
+  mutate(
+  ref_string = case_when(
+    str_detect(`issue_details`, c('REF BD|RMKT|RFDG|REV REF')) ~ "REF",
+    str_detect(`security_description`, c('REF BD|RMKT|RFDG|REV REF'))~ "REF",
+             TRUE ~ "Keep"),
+  ref_string = ifelse(cp_mapping == "REF", "REF", ref_string))
+
+
+table(cities_new_cp$ref_string) 
+# 387 have some type of refinancing, refunding, or remarketing
+
+
+```
+
